@@ -28,7 +28,7 @@ import types
 
 # 'External' Packages
 #import pybash.bashcomplete
-import bashcomplete
+import pybash.bashcomplete
 
 # Temporarily import this from an external library
 #  This will be implemented better, later on.
