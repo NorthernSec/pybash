@@ -10,9 +10,14 @@ class color:
   WHITE    = '\033[97m'
 
 # Imports
+import base64
+import copy
 import contextlib
 import getpass
+import importlib
 import io
+import json
+import marshal
 import os
 import pickle
 import re
@@ -27,7 +32,6 @@ import tty
 import types
 
 # 'External' Packages
-#import pybash.bashcomplete
 import pybash.bashcomplete
 
 # Temporarily import this from an external library
@@ -35,7 +39,7 @@ import pybash.bashcomplete
 import AdvancedInput
 
 # Constants
-REG_OTHER        = re.compile(",((?! ,).)* ,")
+REG_OTHER        = re.compile(",((?!,).)*,")
 REG_BASHVARS     = re.compile("^((?!\\\\).)?(\$\w+)|(\${\w+})")
 REG_PY_MULTILINE = re.compile("""^(def |if |\"\"\"((?!\"\"\").)*|\'\'\'((?!\'\'\').)*)""")
 NO_OUT = ['nano', 'vi', 'alsamixer', 'man']
@@ -51,13 +55,14 @@ defaultSettings={
   "autoload": False,
   "autosave": False,
   "session": None,
-  "globs": {},
+  "globs": {x:y for x,y in globals().items() if type(y)==types.ModuleType},
   "vars": {'bashcomplete':bashcomplete.bashcomplete},
   "bash": True,
   "bash_binary": "/bin/bash",
   "home": os.path.expanduser("~"),
   "history": [],
-  "hooks": {'\t': bashcomplete.bashcomplete}
+  "hooks": {'\t': bashcomplete.bashcomplete},
+  "imports": []
 }
 
 HELP='''py or python               - Switch to python mode
@@ -84,15 +89,34 @@ def stdoutIO(stdout=None):
   sys.stdout = old
 
 
+class Marshaler():
+  @classmethod
+  def serialize(cls, obj):
+    _type = repr(type(obj)).split("'")[1]
+    data = obj
+    if   _type == "function":
+      source = obj.source if 'source' in dir(obj) else "Unknown"
+      data = (base64.b64encode(marshal.dumps(obj.__code__)).decode("utf-8"),
+              obj.__name__, obj.__defaults__, source)
+    #elif _type == "module":
+    return json.dumps((_type, data))
+
+  @classmethod
+  def deserialize(cls, encoded):
+    (_type, content) = json.loads(encoded)
+    if   _type == "function":
+      (code, name, defaults, source) = content
+      code = marshal.loads(base64.b64decode(code.encode("utf-8")))
+      content =  types.FunctionType(code, globals=globals(), name=str(name), argdefs=tuple(defaults) if defaults else None)
+      content.source = source
+    return content
+
+
 class pybash():
   def __init__(self, bash=True, bash_binary="/bin/bash"):
-    self.settings = defaultSettings
+    self._clearSession()
     self.settings["bash"] = bash
     self.settings["bash_binary"] = bash_binary
-    self.settings["globs"]["_term"] = self
-    self._input = AdvancedInput.AdvancedInput()
-    self.settings["history"] = self._input.history
-    self.line = None
 
 
   def history(self, line=None, limit=50):
@@ -118,10 +142,17 @@ class pybash():
     if not path:
       if self.settings['session']: path = self.settings['session']
       else:                        path = os.path.join(self.settings["home"], ".pybash/session.pkl")
+    if not os.path.isabs(path): path = os.path.join(os.getcwd(), path)
     if not os.path.exists(os.path.dirname(path)): os.makedirs(os.path.dirname(path))
     try:
-      self.settings.pop('session')
-      pickle.dump(self.settings, open(path, "wb"))
+      _settings = copy.copy(self.settings)
+      _settings.pop('session')
+      # Remove unserializable objects
+      _settings['vars']  = {x: Marshaler.serialize(y) for x, y in _settings['vars'].items()
+                                  if type(y) is not types.ModuleType}
+      _settings['globs'] = {x: y for x, y in _settings['globs'].items() if type(y) is not types.ModuleType}
+      _settings['globs'] = {}
+      pickle.dump(_settings, open(path, "wb"))
       self.settings['session'] = path
       print("Session saved [%s]"%path)
     except Exception as e:
@@ -130,17 +161,41 @@ class pybash():
 
   def _loadSession(self, path=None, auto=False):
     if not path: path = os.path.join(self.settings["home"], ".pybash/session.pkl")
+    backup = self.settings
     try:
       self.settings=pickle.load(open(path, "rb"))
       self._input.history = self.settings["history"]
       self.settings['session']=path
+      self.settings['vars'] = {x: Marshaler.deserialize(y) for x, y in self.settings['vars'].items()}
+      imports = self.settings.pop('imports')
+      self.settings['imports']=[]
+      self.settings["globs"]["_term"] = self
+      try:
+        for i in imports:
+          self.execPython(i)
+      except:
+        if not auto:  print("Could not reload all dependencies!")
+        raise Exception
+      # Reassign modules by replacing the globals
+      globs = self.settings["globs"] # code reduction
+      for f in [v for k, v in self.settings['vars'].items() if type(v) == types.FunctionType]:
+        self.settings['vars'][f.__name__] = types.FunctionType(f.__code__, globals=self.settings['globs'],
+                                                               name=f.__name__, argdefs=f.__defaults__)
       print("Session loaded [%s]"%path)
-    except:
-      if not auto: print("Could not load session: %s"%path)
+    except Exception as e:
+      traceback.print_exc()
+      if not auto:
+        print("Could not load session: %s"%path)
+        print("Reloading last session")
+      self.session = backup
 
 
   def _clearSession(self):
     self.settings = defaultSettings
+    self.settings["globs"]["_term"] = self
+    self._input = AdvancedInput.AdvancedInput()
+    self.settings["history"] = self._input.history
+    self.line = None
 
 
   def _getCurs(self):
@@ -165,7 +220,20 @@ class pybash():
   def execPython(self, command):
     with stdoutIO() as s:
       try:
-        exec(command, self.settings["globs"], self.settings["vars"])
+        globs = self.settings["globs"] # Code reduction
+        # Check for imports to add to global
+        for line in command.split("\n"):
+          parts = line.strip().split(" ")
+          if   len(parts) > 1 and parts[0] == "import":
+            for i in [x.strip(", ") for x in parts[1:]]:
+              globs[i.split(".")[0]] = importlib.import_module(i.split(".")[0])
+              self.settings["imports"].append(line)
+          elif len(parts) > 3 and parts[0] == "from" and parts[2] == "import ":
+            for i in [x.strip(", ") for x in parts[3:]]:
+              globs[i] = importlib.import_module(parts[1]).__dict__[i]
+              self.settings["imports"].append(line)
+        self.settings["globs"] = globs
+        exec(command, globs, self.settings["vars"])
         if command.startswith("def "):
           funct = command.split(" ")[1].split("(")[0]
           self.settings["vars"][funct].source = command
@@ -220,8 +288,11 @@ class pybash():
     elif _c in ['functs', 'functions']:
       for x, y in self.settings['vars'].items():
         if type(y) is types.FunctionType:
-          vars = ", ".join(y.__code__.co_varnames)
-          print("  %s(%s)"%(x, vars))
+          vars = list(y.__code__.co_varnames)[:y.__code__.co_argcount]
+          defaults = y.__defaults__ if y.__defaults__ else []
+          for i, x in enumerate(defaults):
+            vars[-(i+1)]="%s=%s"%(vars[-(i+1)], x)
+          print("  %s(%s)"%(y.__name__, ', '.join(vars)))
     elif _c in ['hooks']:
        print('\n'.join(["  %s\t%s"%(repr(x),repr(y)) for x,y in
                         self.settings['hooks'].items()]))
@@ -245,8 +316,8 @@ class pybash():
       for _command in set([x.group() for x in REG_OTHER.finditer(command)]):
         command = command.replace(_command, "_term.execBash("+repr(_command[1:-2])+")")
     for _command in set([x.group() for x in REG_OTHER.finditer(command)]):
-      if self.settings["bash"]: value = self.execPython(_command[1:-2])
-      else:                     value = self.execBash(_command[1:-2])
+      if self.settings["bash"]: value = self.execPython(_command[1:-1])
+      else:                     value = self.execBash(_command[1:-1])
       command = command.replace(_command, repr(value))
       if not command: return
     command = command.replace("\\,", ",") # Unescape ,'s
