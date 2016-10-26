@@ -8,6 +8,9 @@ class color:
   PURPLE   = '\033[95m';  STRIKE     = '\033[9m'
   CYAN     = '\033[96m'
   WHITE    = '\033[97m'
+  @classmethod
+  def getCode(cls, text):
+    return cls.__dict__.get(text.upper(), '')
 
 # Imports
 import base64
@@ -39,6 +42,7 @@ import pybash.bashcomplete
 import AdvancedInput
 
 # Constants
+REG_CURSORVARS   = re.compile("%\w+%")
 REG_OTHER        = re.compile(",((?!,).)*,")
 REG_BASHVARS     = re.compile("^((?!\\\\).)?(\$\w+)|(\${\w+})")
 REG_PY_MULTILINE = re.compile("""^(def |if |\"\"\"((?!\"\"\").)*|\'\'\'((?!\'\'\').)*)""")
@@ -47,11 +51,8 @@ NO_OUT = ['nano', 'vi', 'alsamixer', 'man']
 WIN = True if os.name == 'nt' else False
 
 defaultSettings={
-  "colors": {
-    "user": color.RED,
-    "host": color.YELLOW,
-    "path": color.CYAN,
-    "text": color.END},
+  "bashCursor": "%red%%user%%end%@%yellow%%host%%end%:%cyan%%path%%end%$",
+  "pyCursor": "%red%>>>",
   "autoload": False,
   "autosave": False,
   "session": None,
@@ -76,7 +77,13 @@ clear                      - Clear the terminal
 info or inspect <function> - Show source code of function
 settings                   - Print the settings
 help                       - Print this output
-exit                       - Exit pybash'''
+exit                       - Exit pybash
+hooks                      - Print the list of current hooks
+hook                       - Hook a function to a key combination
+unhook                     - Unhook a key combination
+functs                     - Print custom functions
+vars                       - Print custom variables
+cursor                     - Set a custom cursor'''
 
 
 @contextlib.contextmanager
@@ -199,22 +206,21 @@ class pybash():
 
 
   def _getCurs(self):
-    def color(data, setting):
-      return self.settings["colors"][setting] + data + \
-             self.settings["colors"]["text"]
-
-    if not self.settings["bash"]:
-      return ">>> "
-    else:
-      user = getpass.getuser()
-      host = socket.gethostname()
-      path = os.getcwd()
-      if path.startswith(self.settings["home"]):
-        path = path.replace(self.settings["home"], "~", 1)
-      if len(user+host+path)+3 > shutil.get_terminal_size().columns/2:
-        path = "->/"+os.path.basename(os.path.normpath(path))
-      return "%s@%s:%s$ "%(color(user, "user"), color(host, "host"),
-                           color(path, "path"))
+    s = self.settings # code reduction
+    curs = s['bashCursor'] if s['bash'] else s['pyCursor']
+    for _x in set([y.group() for y in REG_CURSORVARS.finditer(curs)]):
+      if   _x[1:-1] == "user": curs = curs.replace(_x, getpass.getuser())
+      elif _x[1:-1] == "host": curs = curs.replace(_x, socket.gethostname())
+      elif _x[1:-1] == "path":
+        path = os.getcwd()
+        if path.startswith(self.settings["home"]):
+          path = path.replace(self.settings["home"], "~", 1)
+        if len(curs+path)+3 > shutil.get_terminal_size().columns/2:
+          path = "->/"+os.path.basename(os.path.normpath(path))
+        curs = curs.replace(_x, path)
+      else:
+        curs = curs.replace(_x, color.getCode(_x[1:-1]))
+    return curs+ color.getCode("end") + ' '
 
 
   def execPython(self, command):
@@ -304,8 +310,19 @@ class pybash():
         self.settings['hooks'][keys] = funct
       else: print("Function <%s> not found"%payload)
     elif _c in ['unhook']:
-      if payload in self.settings['hooks']:
-        del self.settings['hooks'][payload]
+      print("Enter the key combinations and press enter")
+      keys = AdvancedInput.get_raw_input()
+      if keys in self.settings['hooks']: del self.settings['hooks'][keys]
+      else:                              print("Key combination is not a hook")
+    elif _c in ['cursor']:
+      if not payload:
+        print("Set a cursor string for the current language")
+        print("  Variables: %path%, %user%, %host%")
+        print("  Decorators: %s"%', '.join(['%%%s%%'%x.lower() for x, y in color.__dict__.items()
+                                            if type(y) is str and '_' not in y]))
+      else:
+        cursor = 'bashCursor' if self.settings['bash'] else 'pyCursor'
+        self.settings[cursor]=payload
     else:                          print("Command not known")
     return True
 

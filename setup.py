@@ -1,7 +1,7 @@
 from setuptools import setup
 
 setup(name='pybash',
-      version='0.1.3',
+      version='0.1.4',
       description='interpreter for python&bash combined',
       author='Pieter-Jan Moreels',
       url='https://github.com/NorthernSec/pybash',
