@@ -46,6 +46,7 @@ REG_CURSORVARS   = re.compile("%\w+%")
 REG_OTHER        = re.compile(",((?!,).)*,")
 REG_BASHVARS     = re.compile("^((?!\\\\).)?(\$\w+)|(\${\w+})")
 REG_PY_MULTILINE = re.compile("""^(def |if |\"\"\"((?!\"\"\").)*|\'\'\'((?!\'\'\').)*)""")
+REG_ASSIGNMENT   = re.compile("^\w+\s*=")
 NO_OUT = ['nano', 'vi', 'alsamixer', 'man']
 
 WIN = True if os.name == 'nt' else False
@@ -190,7 +191,6 @@ class pybash():
                                                                name=f.__name__, argdefs=f.__defaults__)
       print("Session loaded [%s]"%path)
     except Exception as e:
-      traceback.print_exc()
       if not auto:
         print("Could not load session: %s"%path)
         print("Reloading last session")
@@ -248,22 +248,22 @@ class pybash():
     return s.getvalue()[:-1]
 
 
-  def execBash(self, command):
+  def execBash(self, command, redirect=False):
     environment = {x: str(y) for x, y in self.settings["vars"].items()}
     _c, payload = command.split(" ", 1)+[""]*(2-len(command.split(" ", 1)))
     if   _c == "cd":              os.chdir(payload if payload else self.settings["home"])
     elif _c in ["clear", "cls"]:  os.system("cls" if WIN else "clear")
     elif _c == "history":         self.history(payload)
-    elif _c in NO_OUT:
-      try:
-        subprocess.call([_c]+payload.split(" "))
-      except ProcessLookupError:
-        pass
-      #print("You shouldn't run %s from pybash"%command.split()[0])
     else:
-      return subprocess.Popen(command, shell=True, env=environment,
-                              executable=self.settings["bash_binary"],
-                              stdout=subprocess.PIPE).stdout.read().decode('utf-8')[:-1]
+      if not redirect:
+        try:
+          subprocess.call([_c]+payload.split(" "))
+        except ProcessLookupError:
+          pass
+      else:
+        return subprocess.Popen(command, shell=True, env=environment,
+                                executable=self.settings["bash_binary"],
+                                stdout=subprocess.PIPE).stdout.read().decode('utf-8')[:-1]
 
 
   def _pybashCommand(self, command):
@@ -334,11 +334,13 @@ class pybash():
         command = command.replace(_command, "_term.execBash("+repr(_command[1:-2])+")")
     for _command in set([x.group() for x in REG_OTHER.finditer(command)]):
       if self.settings["bash"]: value = self.execPython(_command[1:-1])
-      else:                     value = self.execBash(_command[1:-1])
+      else:                     value = self.execBash(_command[1:-1], redirect=True)
       command = command.replace(_command, repr(value))
       if not command: return
     command = command.replace("\\,", ",") # Unescape ,'s
-    if self.settings["bash"]: return self.execBash(command)
+    # Set redirect depending on variable assignment or not
+    redirect = True if REG_ASSIGNMENT.match(command) else False
+    if self.settings["bash"]: return self.execBash(command, redirect=redirect)
     else:                     return self.execPython(command)
 
 
