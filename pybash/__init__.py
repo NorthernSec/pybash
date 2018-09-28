@@ -260,11 +260,17 @@ class pybash():
           subprocess.call([_c]+payload.split(" "))
         except ProcessLookupError:
           pass
+        except Exception as e:
+          print("command didn't execute: %s"%e)
       else:
-        return subprocess.Popen(command, shell=True, env=environment,
-                                executable=self.settings["bash_binary"],
-                                stdout=subprocess.PIPE).stdout.read().decode('utf-8')[:-1]
-
+        try:
+          return subprocess.Popen(command, shell=True, env=environment,
+                                  executable=self.settings["bash_binary"],
+                                  stdout=subprocess.PIPE).stdout.read().decode('utf-8')[:-1]
+        except ProcessLookupError:
+          pass
+        except Exception as e:
+          print("command didn't execute: %s"%e)
 
   def _pybashCommand(self, command):
     if not command.startswith(":"): return False
